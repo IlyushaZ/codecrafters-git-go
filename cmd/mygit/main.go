@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 )
 
 const (
@@ -18,7 +19,7 @@ func catFile(w io.Writer, hash string) error {
 		return errors.New("invalid hash given")
 	}
 
-	path := hash[:2] + "/" + hash[2:]
+	path := path.Join(".git/objects", hash[:2], hash[2:])
 
 	f, err := os.Open(path)
 	if err != nil {
