@@ -99,6 +99,7 @@ func hashBlob(filePath string) (string, error) {
 	if _, err := zlw.Write(buf.Bytes()); err != nil {
 		return "", fmt.Errorf("write to blob file: %w", err)
 	}
+	defer zlw.Close()
 
 	return hex, nil
 }
