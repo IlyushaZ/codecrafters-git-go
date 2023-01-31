@@ -77,8 +77,9 @@ func hashBlob(filePath string) (string, error) {
 	buf.Grow(size)
 	io.Copy(&buf, origFile)
 
-	sum := sha1.New().Sum(buf.Bytes())
-	hex := hex.EncodeToString(sum)
+	sha := sha1.New()
+	sha.Write(buf.Bytes())
+	hex := hex.EncodeToString(sha.Sum(nil))
 
 	blobPath := path.Join(".git/objects", hex[:2])
 
