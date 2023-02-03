@@ -11,32 +11,46 @@ import (
 	"io"
 	"os"
 	"path"
+	"strings"
 )
 
 const (
 	blob = "blob"
 )
 
-func catFile(w io.Writer, hash string) error {
-	if len(hash) != 40 {
-		return errors.New("invalid hash given")
-	}
+var ErrInvalidHash = errors.New("hash is not sha-1")
 
+func getDecompressedObject(hash string) (rc io.Reader, closeFn func(), err error) {
 	path := path.Join(".git/objects", hash[:2], hash[2:])
 
 	f, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("open file: %w", err)
+		return nil, nil, fmt.Errorf("open file: %w", err)
 	}
-	defer f.Close()
 
 	zlr, err := zlib.NewReader(f)
 	if err != nil {
-		return fmt.Errorf("create zlib reader: %w", err)
+		return nil, nil, fmt.Errorf("create zlib reader: %w", err)
 	}
-	defer zlr.Close()
 
-	br := bufio.NewReader(zlr)
+	return zlr, func() {
+		f.Close()
+		zlr.Close()
+	}, nil
+}
+
+func catFile(w io.Writer, hash string) error {
+	if len(hash) != 40 {
+		return ErrInvalidHash
+	}
+
+	decompressed, close, err := getDecompressedObject(hash)
+	if err != nil {
+		return err
+	}
+	defer close()
+
+	br := bufio.NewReader(decompressed)
 	for {
 		b, err := br.ReadByte()
 		if err != nil {
@@ -104,6 +118,62 @@ func hashBlob(filePath string) (string, error) {
 	return hex, nil
 }
 
+func lsTree(w io.Writer, hash string) error {
+	if len(hash) != 40 {
+		return ErrInvalidHash
+	}
+
+	decompressed, close, err := getDecompressedObject(hash)
+	if err != nil {
+		return err
+	}
+	defer close()
+
+	br := bufio.NewReader(decompressed)
+
+	// read header
+	header, err := br.ReadString('\x00')
+	if err != nil {
+		return fmt.Errorf("read header: %w", err)
+	}
+	if !headerValid("tree", header) {
+		return fmt.Errorf("invalid header: %s", err)
+	}
+
+	for {
+		entry, err := br.ReadString('\x00')
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+
+			return fmt.Errorf("read entry: %w", err)
+		}
+
+		entry = strings.TrimRight(entry, "\x00")
+		split := strings.Split(entry, " ")
+
+		fmt.Fprintln(w, split[1])
+
+		br.Discard(20)
+	}
+
+	return nil
+}
+
+func headerValid(expectedType, have string) bool {
+	split := strings.Split(have, " ")
+	if len(split) != 2 {
+		return false
+	}
+
+	if split[0] != expectedType {
+		return false
+	}
+
+	return true
+}
+
 func ensureArgsLen(ln int) {
 	if len(os.Args) < ln {
 		fmt.Fprintf(os.Stderr, "Invalid number of arguments\n")
@@ -151,6 +221,15 @@ func main() {
 		}
 
 		fmt.Fprint(os.Stdout, hash)
+
+	case "ls-tree":
+		ensureArgsLen(4)
+
+		err := lsTree(os.Stdout, os.Args[3])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to ls tree: %v\n", err)
+			os.Exit(1)
+		}
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
