@@ -3,9 +3,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"compress/zlib"
-	"crypto/sha1"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -14,30 +11,7 @@ import (
 	"strings"
 )
 
-const (
-	blob = "blob"
-)
-
 var ErrInvalidHash = errors.New("hash is not sha-1")
-
-func getDecompressedObject(hash string) (rc io.Reader, closeFn func(), err error) {
-	path := path.Join(".git/objects", hash[:2], hash[2:])
-
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open file: %w", err)
-	}
-
-	zlr, err := zlib.NewReader(f)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create zlib reader: %w", err)
-	}
-
-	return zlr, func() {
-		f.Close()
-		zlr.Close()
-	}, nil
-}
 
 func catFile(w io.Writer, hash string) error {
 	if len(hash) != 40 {
@@ -66,16 +40,16 @@ func catFile(w io.Writer, hash string) error {
 	return nil
 }
 
-func hashBlob(filePath string) (string, error) {
+func hashBlob(filePath string) ([]byte, error) {
 	origFile, err := os.Open(filePath)
 	if err != nil {
-		return "", fmt.Errorf("open file: %w", err)
+		return nil, fmt.Errorf("open file: %w", err)
 	}
 	defer origFile.Close()
 
 	fi, err := origFile.Stat()
 	if err != nil {
-		return "", fmt.Errorf("get file info: %w", err)
+		return nil, fmt.Errorf("get file info: %w", err)
 	}
 
 	// write header
@@ -84,36 +58,63 @@ func hashBlob(filePath string) (string, error) {
 
 	var buf bytes.Buffer
 	if _, err := buf.WriteString(header); err != nil {
-		return "", fmt.Errorf("write header")
+		return nil, fmt.Errorf("write header")
 	}
 
 	// write file's content after header
 	buf.Grow(size)
 	io.Copy(&buf, origFile)
 
-	sha := sha1.New()
-	sha.Write(buf.Bytes())
-	hex := hex.EncodeToString(sha.Sum(nil))
-
-	blobPath := path.Join(".git/objects", hex[:2])
-
-	if err := os.MkdirAll(blobPath, 0770); err != nil {
-		return "", fmt.Errorf("mkdir: %w", err)
+	hex := hash(buf.Bytes())
+	if err := saveCompressed(hex, buf.Bytes()); err != nil {
+		return nil, err
 	}
 
-	blobPath = path.Join(blobPath, hex[2:])
-	blobFile, err := os.Create(blobPath)
+	return hex, nil
+}
+
+func writeTree(root string) ([]byte, error) {
+	dir, err := os.ReadDir(root)
 	if err != nil {
-		return "", fmt.Errorf("create blob file: %w", err)
+		return nil, fmt.Errorf("read dir: %w", err)
 	}
-	defer blobFile.Close()
 
-	// write compressed contents (header+file contents)
-	zlw := zlib.NewWriter(blobFile)
-	if _, err := zlw.Write(buf.Bytes()); err != nil {
-		return "", fmt.Errorf("write to blob file: %w", err)
+	var buf bytes.Buffer
+
+	for _, entry := range dir {
+		if entry.Name() == ".git" {
+			continue
+		}
+
+		if entry.IsDir() {
+			hash, err := writeTree(path.Join(root, entry.Name()))
+			if err != nil {
+				return nil, fmt.Errorf("write subtree: %w", err)
+			}
+
+			fmt.Fprintf(&buf, "40000 %s\u0000%s", entry.Name(), hash)
+			continue
+		}
+
+		hash, err := hashBlob(path.Join(root, entry.Name()))
+		if err != nil {
+			return nil, fmt.Errorf("hash blob: %w", err)
+		}
+
+		fmt.Fprintf(&buf, "100644 %s\u0000%s", entry.Name(), hash)
 	}
-	defer zlw.Close()
+
+	var finalBuf bytes.Buffer
+	finalBuf.Grow(buf.Len())
+
+	fmt.Fprintf(&finalBuf, "tree %d\u0000", buf.Len())
+	io.Copy(&finalBuf, &buf)
+
+	hex := hash(finalBuf.Bytes())
+
+	if err := saveCompressed(hex, finalBuf.Bytes()); err != nil {
+		return nil, err
+	}
 
 	return hex, nil
 }
@@ -161,26 +162,6 @@ func lsTree(w io.Writer, hash string) error {
 	return nil
 }
 
-func headerValid(expectedType, have string) bool {
-	split := strings.Split(have, " ")
-	if len(split) != 2 {
-		return false
-	}
-
-	if split[0] != expectedType {
-		return false
-	}
-
-	return true
-}
-
-func ensureArgsLen(ln int) {
-	if len(os.Args) < ln {
-		fmt.Fprintf(os.Stderr, "Invalid number of arguments\n")
-		os.Exit(1)
-	}
-}
-
 // Usage: your_git.sh <command> <arg1> <arg2> ...
 func main() {
 	if len(os.Args) < 2 {
@@ -220,7 +201,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		fmt.Fprint(os.Stdout, hash)
+		fmt.Print(hashToString(hash))
 
 	case "ls-tree":
 		ensureArgsLen(4)
@@ -230,6 +211,21 @@ func main() {
 			fmt.Fprintf(os.Stderr, "Failed to ls tree: %v\n", err)
 			os.Exit(1)
 		}
+
+	case "write-tree":
+		dir, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to get working dir: %v\n", err)
+			os.Exit(1)
+		}
+
+		hash, err := writeTree(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to write tree: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Print(hashToString(hash))
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
