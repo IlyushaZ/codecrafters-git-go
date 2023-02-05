@@ -24,6 +24,7 @@ func headerValid(expectedType, have string) bool {
 	return true
 }
 
+// TODO: remove this
 func ensureArgsLen(ln int) {
 	if len(os.Args) < ln {
 		fmt.Fprintf(os.Stderr, "Invalid number of arguments\n")

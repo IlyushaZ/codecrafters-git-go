@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 )
 
 var ErrInvalidHash = errors.New("hash is not sha-1")
@@ -65,12 +66,12 @@ func hashBlob(filePath string) ([]byte, error) {
 	buf.Grow(size)
 	io.Copy(&buf, origFile)
 
-	hex := hash(buf.Bytes())
-	if err := saveCompressed(hex, buf.Bytes()); err != nil {
+	hash := hash(buf.Bytes())
+	if err := saveCompressed(hash, buf.Bytes()); err != nil {
 		return nil, err
 	}
 
-	return hex, nil
+	return hash, nil
 }
 
 func writeTree(root string) ([]byte, error) {
@@ -110,13 +111,13 @@ func writeTree(root string) ([]byte, error) {
 	fmt.Fprintf(&finalBuf, "tree %d\u0000", buf.Len())
 	io.Copy(&finalBuf, &buf)
 
-	hex := hash(finalBuf.Bytes())
+	hash := hash(finalBuf.Bytes())
 
-	if err := saveCompressed(hex, finalBuf.Bytes()); err != nil {
+	if err := saveCompressed(hash, finalBuf.Bytes()); err != nil {
 		return nil, err
 	}
 
-	return hex, nil
+	return hash, nil
 }
 
 func lsTree(w io.Writer, hash string) error {
@@ -160,6 +161,38 @@ func lsTree(w io.Writer, hash string) error {
 	}
 
 	return nil
+}
+
+func commitTree(treeHash, prevCommit, msg string) ([]byte, error) {
+	if len(treeHash) != 40 || len(prevCommit) != 40 {
+		return nil, ErrInvalidHash
+	}
+
+	now := time.Now()
+	_, offset := now.Zone()
+	unix := now.Unix()
+
+	var buf bytes.Buffer
+	fmt.Fprintf(&buf, `tree %s
+parent %s
+author Ilya Zyabirov <zyabirov@yandex.ru> %d %+d
+committer GitHub <noreply@github.com> %d %+d
+	
+%s
+`, treeHash, prevCommit, unix, offset, unix, offset, msg)
+
+	var finalBuf bytes.Buffer
+	fmt.Fprintf(&finalBuf, "commit %d\u0000", buf.Len())
+	finalBuf.Grow(buf.Len())
+	io.Copy(&finalBuf, &buf)
+
+	hash := hash(finalBuf.Bytes())
+
+	if err := saveCompressed(hash, finalBuf.Bytes()); err != nil {
+		return nil, err
+	}
+
+	return hash, nil
 }
 
 // Usage: your_git.sh <command> <arg1> <arg2> ...
@@ -226,6 +259,17 @@ func main() {
 		}
 
 		fmt.Print(hashToString(hash))
+
+	case "commit-tree":
+		ensureArgsLen(7)
+
+		hash, err := commitTree(os.Args[2], os.Args[4], os.Args[6])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to commit tree: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println(hashToString(hash))
 
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command %s\n", command)
